@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>SchrauberBase – Fahrzeugfehler-Wissensdatenbank</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <style>
+    body { -webkit-tap-highlight-color: transparent; }
+    details > summary { list-style: none; }
+    details > summary::-webkit-details-marker { display: none; }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen antialiased">
+  <header class="sticky top-0 z-20 bg-slate-900/95 backdrop-blur border-b border-slate-800">
+    <div class="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between gap-3">
+      <div>
+        <h1 class="text-lg sm:text-xl font-bold tracking-tight text-white">SchrauberBase</h1>
+        <p class="text-xs text-slate-400">Fahrzeugfehler-Wissensdatenbank · Live aus Supabase</p>
+      </div>
+      <div class="flex items-center gap-2">
+        <span id="countBadge" class="text-xs font-medium px-2.5 py-1 rounded-full bg-slate-800 text-slate-300 border border-slate-700">Lade…</span>
+        <button id="refreshBtn" type="button" class="text-xs font-medium px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white transition">
+          Aktualisieren
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main class="max-w-5xl mx-auto px-4 py-5 space-y-5">
+    <section class="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-3">
+      <div>
+        <label for="searchInput" class="sr-only">Suche</label>
+        <input
+          id="searchInput"
+          type="search"
+          placeholder="Suche nach Modell, Fehlercode (z. B. P2002), Symptom, Motorcode, Teilenummer…"
+          class="w-full rounded-xl bg-slate-950 border border-slate-700 px-3.5 py-2.5 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+        />
+      </div>
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+        <select id="makeFilter" class="rounded-xl bg-slate-950 border border-slate-700 px-3 py-2 text-sm text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500">
+          <option value="all">Alle Marken</option>
+        </select>
+        <select id="categoryFilter" class="rounded-xl bg-slate-950 border border-slate-700 px-3 py-2 text-sm text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500">
+          <option value="all">Alle Kategorien</option>
+        </select>
+        <select id="statusFilter" class="rounded-xl bg-slate-950 border border-slate-700 px-3 py-2 text-sm text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500">
+          <option value="all">Alle Prüfstatus (inkl. Entwurf)</option>
+          <option value="plausible">Nur Geprüft / Plausibel</option>
+          <option value="draft">Nur Entwurf (draft)</option>
+          <option value="rejected">Nur Abgelehnt</option>
+        </select>
+      </div>
+    </section>
+
+    <div id="errorBox" class="hidden rounded-xl bg-red-950/60 border border-red-800 p-4 text-sm text-red-200"></div>
+    <div id="results" class="space-y-4"></div>
+  </main>
+
+  <script>
+    const SUPABASE_URL = 'https://kjikxopjqtunfxocogtv.supabase.co';
+    const SUPABASE_KEY = 'sb_publishable_ri_NAbQI0zhMHfzzNaxI-A_YwNA_kFe';
+    const db = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+    let allFaults = [];
+
+    const els = {
+      search: document.getElementById('searchInput'),
+      make: document.getElementById('makeFilter'),
+      category: document.getElementById('categoryFilter'),
+      status: document.getElementById('statusFilter'),
+      results: document.getElementById('results'),
+      errorBox: document.getElementById('errorBox'),
+      countBadge: document.getElementById('countBadge'),
+      refreshBtn: document.getElementById('refreshBtn'),
+    };
+
+    function esc(str) {
+      if (str === null || str === undefined) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+
+    function statusBadge(status) {
+      const map = {
+        plausible: ['Geprüft / Plausibel', 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'],
+        draft: ['Entwurf (draft)', 'bg-amber-500/15 text-amber-300 border-amber-500/30'],
+        rejected: ['Abgelehnt', 'bg-red-500/15 text-red-300 border-red-500/30'],
+      };
+      const [label, cls] = map[status] || [status || 'Unbekannt', 'bg-slate-800 text-slate-300 border-slate-700'];
+      return `<span class="text-xs font-medium px-2.5 py-0.5 rounded-full border ${cls}">${esc(label)}</span>`;
+    }
+
+    function outcomeBadge(outcome) {
+      const map = {
+        solved_confirmed: ['Gelöst bestätigt', 'bg-blue-500/15 text-blue-300 border-blue-500/30'],
+        probable_fix: ['Wahrscheinliche Lösung', 'bg-indigo-500/15 text-indigo-300 border-indigo-500/30'],
+        unsolved: ['Ungelöst', 'bg-rose-500/15 text-rose-300 border-rose-500/30'],
+        unknown: ['Status unbekannt', 'bg-slate-800 text-slate-400 border-slate-700'],
+      };
+      const [label, cls] = map[outcome] || [outcome || 'Unbekannt', 'bg-slate-800 text-slate-400 border-slate-700'];
+      return `<span class="text-xs font-medium px-2.5 py-0.5 rounded-full border ${cls}">${esc(label)}</span>`;
+    }
+
+    function formatVehicle(v) {
+      const years = v.year_from || v.year_to ? ` (${v.year_from || '?'}–${v.year_to || 'heute'})` : '';
+      const gen = v.generation ? ` ${v.generation}` : '';
+      const extras = [];
+      if (v.engine_code && v.engine_code !== 'not_reported') extras.push(`Motor: ${v.engine_code}`);
+      if (v.gearbox_code && v.gearbox_code !== 'not_reported') extras.push(`Getriebe: ${v.gearbox_code}`);
+      const extraText = extras.length ? ` · ${extras.join(' · ')}` : '';
+      return `${v.make || ''} ${v.model || ''}${gen}${years}${extraText}`.trim();
+    }
+
+    function populateFilters(faults) {
+      const makes = new Set();
+      const categories = new Set();
+      faults.forEach(f => {
+        if (f.category) categories.add(f.category);
+        (f.fault_vehicles || []).forEach(v => { if (v.make) makes.add(v.make); });
+      });
+
+      const currentMake = els.make.value;
+      els.make.innerHTML = '<option value="all">Alle Marken</option>' +
+        Array.from(makes).sort().map(m => `<option value="${esc(m)}">${esc(m)}</option>`).join('');
+      if (Array.from(makes).includes(currentMake)) els.make.value = currentMake;
+
+      const currentCat = els.category.value;
+      els.category.innerHTML = '<option value="all">Alle Kategorien</option>' +
+        Array.from(categories).sort().map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
+      if (Array.from(categories).includes(currentCat)) els.category.value = currentCat;
+    }
+
+    function render() {
+      const q = els.search.value.trim().toLowerCase();
+      const makeVal = els.make.value;
+      const catVal = els.category.value;
+      const statusVal = els.status.value;
+
+      const filtered = allFaults.filter(f => {
+        if (statusVal !== 'all' && f.review_status !== statusVal) return false;
+        if (catVal !== 'all' && f.category !== catVal) return false;
+        const vehicles = f.fault_vehicles || [];
+        if (makeVal !== 'all' && !vehicles.some(v => v.make === makeVal)) return false;
+
+        if (!q) return true;
+        const haystack = [
+          f.title, f.category, f.root_cause, f.solution,
+          ...(f.symptoms || []), ...(f.dtc_codes || []), ...(f.part_numbers || []),
+          ...vehicles.map(v => `${v.make} ${v.model} ${v.generation || ''} ${v.engine_code || ''} ${v.gearbox_code || ''} ${v.year_from || ''} ${v.year_to || ''}`)
+        ].join(' ').toLowerCase();
+        return haystack.includes(q);
+      });
+
+      els.countBadge.textContent = `${filtered.length} von ${allFaults.length} Fällen`;
+
+      if (!filtered.length) {
+        els.results.innerHTML = `
+          <div class="rounded-2xl bg-slate-900 border border-slate-800 p-8 text-center text-slate-400 text-sm">
+            Keine passenden Fehlerfälle gefunden. Filter anpassen oder Suchbegriff ändern.
+          </div>`;
+        return;
+      }
+
+      els.results.innerHTML = filtered.map(f => {
+        const vehicles = f.fault_vehicles || [];
+        const sources = f.fault_sources || [];
+        const confirmations = f.fault_confirmations || [];
+        const workedCount = confirmations.filter(c => c.worked).length;
+        const missing = f.missing_fields || [];
+        const noiseNotes = sources.map(s => s.ignored_noise_summary).filter(Boolean);
+
+        return `
+        <article class="rounded-2xl bg-slate-900 border border-slate-800 p-4 sm:p-5 space-y-4 shadow-sm">
+          <div class="flex flex-wrap items-start justify-between gap-2">
+            <div class="space-y-1">
+              <div class="flex flex-wrap items-center gap-1.5">
+                ${statusBadge(f.review_status)}
+                ${outcomeBadge(f.outcome)}
+                ${f.category ? `<span class="text-xs px-2.5 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700">${esc(f.category)}</span>` : ''}
+              </div>
+              <h2 class="text-base sm:text-lg font-semibold text-white pt-1">${esc(f.title)}</h2>
+            </div>
+            ${confirmations.length ? `<span class="text-xs font-medium px-2.5 py-1 rounded-lg bg-emerald-950/70 text-emerald-300 border border-emerald-800">Praxis-Tests: ${workedCount}/${confirmations.length} erfolgreich</span>` : ''}
+          </div>
+
+          ${vehicles.length ? `
+          <div class="flex flex-wrap gap-2">
+            ${vehicles.map(v => `<span class="text-xs px-2.5 py-1 rounded-lg bg-slate-800/90 text-slate-200 border border-slate-700">🚗 ${esc(formatVehicle(v))}</span>`).join('')}
+          </div>` : ''}
+
+          ${(f.dtc_codes && f.dtc_codes.length) ? `
+          <div class="flex flex-wrap items-center gap-1.5">
+            <span class="text-xs text-slate-400 mr-1">Fehlercodes:</span>
+            ${f.dtc_codes.map(c => `<code class="text-xs font-mono px-2 py-0.5 rounded bg-slate-950 text-cyan-300 border border-slate-700">${esc(c)}</code>`).join('')}
+          </div>` : ''}
+
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+            ${(f.symptoms && f.symptoms.length) ? `
+            <div class="rounded-xl bg-slate-950/60 border border-slate-800/80 p-3.5">
+              <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">Symptome</h3>
+              <ul class="list-disc list-inside space-y-1 text-slate-200">
+                ${f.symptoms.map(s => `<li>${esc(s)}</li>`).join('')}
+              </ul>
+            </div>` : ''}
+
+            ${f.root_cause ? `
+            <div class="rounded-xl bg-slate-950/60 border border-slate-800/80 p-3.5">
+              <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">Ursache</h3>
+              <p class="text-slate-200 leading-relaxed">${esc(f.root_cause)}</p>
+            </div>` : ''}
+          </div>
+
+          ${(f.diagnosis_steps && f.diagnosis_steps.length) ? `
+          <div class="rounded-xl bg-slate-950/60 border border-slate-800/80 p-3.5 text-sm">
+            <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">Diagnoseschritte</h3>
+            <ol class="list-decimal list-inside space-y-1 text-slate-200">
+              ${f.diagnosis_steps.map(step => `<li>${esc(step)}</li>`).join('')}
+            </ol>
+          </div>` : ''}
+
+          ${f.solution ? `
+          <div class="rounded-xl bg-blue-950/30 border border-blue-900/50 p-3.5 text-sm">
+            <h3 class="text-xs font-semibold uppercase tracking-wider text-blue-300 mb-1.5">Lösung</h3>
+            <p class="text-slate-100 leading-relaxed">${esc(f.solution)}</p>
+          </div>` : ''}
+
+          ${(f.part_numbers && f.part_numbers.length) ? `
+          <div class="flex flex-wrap items-center gap-1.5 text-xs">
+            <span class="text-slate-400">Teilenummern:</span>
+            ${f.part_numbers.map(p => `<code class="font-mono px-2 py-0.5 rounded bg-slate-950 text-amber-200 border border-slate-700">${esc(p)}</code>`).join('')}
+          </div>` : ''}
+
+          ${sources.length ? `
+          <div class="pt-1 flex flex-wrap items-center gap-2 text-xs text-slate-400">
+            <span>Quellen:</span>
+            ${sources.map(s => s.url
+              ? `<a href="${esc(s.url)}" target="_blank" rel="noopener noreferrer" class="text-blue-400 hover:underline">${esc(s.source_type || 'Quelle')}${s.published_date ? ` (${esc(s.published_date)})` : ''} ↗</a>`
+              : `<span>${esc(s.source_type || 'Quelle')}${s.document_ref ? `: ${esc(s.document_ref)}` : ''}</span>`
+            ).join(' · ')}
+          </div>` : ''}
+
+          ${(missing.length || noiseNotes.length) ? `
+          <details class="rounded-xl bg-slate-950/70 border border-slate-800 p-3 text-xs">
+            <summary class="cursor-pointer font-medium text-slate-300 flex items-center justify-between">
+              <span>Experten- &amp; Qualitätsinfos (${missing.length} fehlende Felder)</span>
+              <span class="text-slate-500">Aufklappen ▾</span>
+            </summary>
+            <div class="mt-3 space-y-2 text-slate-400 border-t border-slate-800 pt-2.5">
+              ${missing.length ? `<div><strong class="text-slate-300">Fehlende Angaben:</strong> ${missing.map(m => `<code class="px-1.5 py-0.5 rounded bg-slate-900 text-amber-300">${esc(m)}</code>`).join(' ')}</div>` : ''}
+              ${noiseNotes.length ? `<div><strong class="text-slate-300">Rausch-Filter:</strong> ${esc(noiseNotes.join(' | '))}</div>` : ''}
+            </div>
+          </details>` : ''}
+        </article>`;
+      }).join('');
+    }
+
+    async function loadFaults() {
+      els.errorBox.classList.add('hidden');
+      els.countBadge.textContent = 'Lade…';
+      try {
+        const { data, error } = await db
+          .from('faults')
+          .select('*, fault_vehicles(*), fault_sources(*), fault_confirmations(*)')
+          .order('created_at', { ascending: false });
+
+        if (error) throw error;
+        allFaults = data || [];
+        populateFilters(allFaults);
+        render();
+      } catch (err) {
+        els.errorBox.textContent = 'Fehler beim Laden aus Supabase: ' + (err.message || String(err));
+        els.errorBox.classList.remove('hidden');
+        els.countBadge.textContent = 'Fehler';
+      }
+    }
+
+    els.search.addEventListener('input', render);
+    els.make.addEventListener('change', render);
+    els.category.addEventListener('change', render);
+    els.status.addEventListener('change', render);
+    els.refreshBtn.addEventListener('click', loadFaults);
+
+    loadFaults();
+  </script>
+</body>
+</html>
